@@ -9,8 +9,8 @@ coverage  # Used in computing code coverage
 docker  # To run remote submissions
 Fiona  # Used in GpkgMapsDB.py
 geopandas>=0.12.1  # Used to read maps
-grpcio==1.43.0  # Used for communication with submission container
-grpcio-tools==1.43.0  # Used for communication with submission container
+grpcio #==1.43.0  # Used for communication with submission container
+grpcio-tools #==1.43.0  # Used for communication with submission container
 guppy3==3.1.2
 hydra-core==1.1.0rc1  # Used for configs
 hypothesis
@@ -21,8 +21,8 @@ matplotlib  # Used for rendering
 mock
 moto
 nest_asyncio  # Used to nest event loops when running nuBoard/jupyter
-numpy==1.23.4
-opencv-python<=4.5.1.48  # Used widely
+numpy #==1.23.4
+opencv-python #<=4.5.1.48  # Used widely
 pandas    # Used widely
 Pillow    # Used widely to render images
 pre-commit  # Used in pre-commit hooks
