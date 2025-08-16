@@ -11,8 +11,8 @@ Fiona  # Used in GpkgMapsDB.py
 geopandas>=0.12.1  # Used to read maps
 grpcio #==1.43.0  # Used for communication with submission container
 grpcio-tools #==1.43.0  # Used for communication with submission container
-guppy3==3.1.2
-hydra-core==1.1.0rc1  # Used for configs
+# guppy==3.1.2 installed separately
+# hydra-core==1.1.0rc1  # Used for configs installed seprately
 hypothesis
 joblib
 jupyter  # Used to show the notebook
@@ -21,7 +21,7 @@ matplotlib  # Used for rendering
 mock
 moto
 nest_asyncio  # Used to nest event loops when running nuBoard/jupyter
-numpy #==1.23.4
+numpy ==1.23.5
 opencv-python #<=4.5.1.48  # Used widely
 pandas    # Used widely
 Pillow    # Used widely to render images
