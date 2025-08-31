@@ -101,7 +101,7 @@ class MyPlanner(AbstractPlanner):
         s_min = s - half_eff_long - ego_length / 2 - safety_buffer_rear
         s_max = s + half_eff_long + ego_length / 2 + safety_buffer_front
 
-        return l_offset, s_min, s_max
+        return l, s_min, s_max
 
     def _compute_st_boundaries(
         self,
@@ -122,15 +122,13 @@ class MyPlanner(AbstractPlanner):
         safety_buffer_rear = 5.0  # safety distance behind
         lateral_threshold = 5.0  # lateral distance to consider obstacles/collision risk
 
-        intervals: List[Tuple[float, float]] = []
-        boundaries: List[Tuple[float, float]] = []
-
+        boundaries = [[] for _ in range(len(time_stamps))]
         path_x_np = np.array(path_x)
         path_y_np = np.array(path_y)
         path_heading_np = np.array(path_heading)
         path_idx2s_np = np.array(path_idx2s)
 
-        for t_idx, tracked in enumerate(tracked_objects):
+        for tracked in enumerate(tracked_objects.tracked_objects):
             if not tracked.predictions:
                 l, s_min, s_max = self._compute_s_box(
                     ego_length,
@@ -149,7 +147,7 @@ class MyPlanner(AbstractPlanner):
                 if abs(l) > lateral_threshold:
                     continue
 
-                for t_idx in range(len(boundaries)):
+                for t_idx in range(len(time_stamps)):
                     boundaries[t_idx].append((s_min, s_max))
             else:
                 # dynamic object
@@ -191,7 +189,7 @@ class MyPlanner(AbstractPlanner):
                         merged.append(current)
                 boundaries[t_idx] = merged
 
-        return merged
+        return boundaries
 
     def _generate_quintic_speed_profile(
         self,
@@ -270,10 +268,10 @@ class MyPlanner(AbstractPlanner):
                 return False
 
             # ST boundary constraint
-            for j in range(len(st_boundaries)):
-                s_min, s_max_bound = st_boundaries[j]
-                if  s_min <= s <= s_max_bound:
-                    return False
+            if i < len(st_boundaries) and st_boundaries[i]:
+                for (s_min, s_max) in st_boundaries[i]:
+                    if s_min <= s <= s_max:
+                        return False
 
         return True
 
@@ -396,8 +394,6 @@ class MyPlanner(AbstractPlanner):
         optimal_speed_s, optimal_speed_s_dot, optimal_speed_s_2dot, optimal_speed_t = (
             self.speed_planning(
                 ego_state,
-                horizon_time,
-                sampling_time
                 max_velocity,
                 tracked_objects,
                 path_idx2s,
