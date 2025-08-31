@@ -39,16 +39,13 @@ class SimplePredictor(AbstractPredictor):
             ]
 
             # Constant velocity model
-            # robability = 1.0. trajectory length = duration / sample_time
+            # probability = 1.0. trajectory length = duration / sample_time
             for object in objects:
-                if object.velocity is None or np.linalg.norm(object.velocity.x, object.velocity.y) < 1e-6:
-                    # Static object, skip prediction
-                    continue
                 current_pose = object.center
                 velocity = object.velocity
                 # No steering
-                heading_rate =  0
-                waypoints = [] # List[Waypoint]
+                heading_rate = 0
+                waypoints = []  # List[Waypoint]
                 for i in range(self._num_samples):
                     time_us = int((i + 1) * self._sample_time * 1e6)
                     delta_t = (i + 1) * self._sample_time
@@ -56,9 +53,19 @@ class SimplePredictor(AbstractPredictor):
                     new_pos_y = current_pose.y + velocity.y * delta_t
                     new_heading = current_pose.heading + heading_rate * delta_t
                     # Append to waypoints keep its original orientation box
-                    waypoints.append(Waypoint(time_point=time_us, oriented_box=OrientedBox.from_new_pose(object.box, StateSE2(new_pos_x, new_pos_y, new_heading)), velocity=velocity))
-
-                predicted_trajectories = PredictedTrajectory(waypoints=waypoints, probability=1.0)  # predicted_trajectories : List[PredictedTrajectory]
+                    waypoints.append(
+                        Waypoint(
+                            time_point=time_us,
+                            oriented_box=OrientedBox.from_new_pose(
+                                object.box, StateSE2(new_pos_x, new_pos_y, new_heading)
+                            ),
+                            velocity=velocity,
+                        )
+                    )
+                # only one predictio
+                predicted_trajectories = [PredictedTrajectory(
+                    waypoints=waypoints, probability=1.0
+                )] 
                 object.predictions = predicted_trajectories
 
             return objects

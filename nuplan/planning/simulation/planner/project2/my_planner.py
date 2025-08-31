@@ -1,6 +1,7 @@
 import math
 import logging
 from typing import List, Type, Optional, Tuple, Dict
+import click
 
 import numpy as np
 import numpy.typing as npt
@@ -128,7 +129,8 @@ class MyPlanner(AbstractPlanner):
         path_heading_np = np.array(path_heading)
         path_idx2s_np = np.array(path_idx2s)
 
-        for tracked in enumerate(tracked_objects.tracked_objects):
+
+        for _, tracked in enumerate(tracked_objects):
             if not tracked.predictions:
                 l, s_min, s_max = self._compute_s_box(
                     ego_length,
@@ -165,7 +167,7 @@ class MyPlanner(AbstractPlanner):
                         waypoint.oriented_box.center.y,
                         waypoint.oriented_box.length,
                         waypoint.oriented_box.width,
-                        waypoint.oriented_box.heading,
+                        waypoint.oriented_box.center.heading,
                         safety_buffer_front,
                         safety_buffer_rear,
                     )
@@ -189,6 +191,7 @@ class MyPlanner(AbstractPlanner):
                         merged.append(current)
                 boundaries[t_idx] = merged
 
+        click.secho(f"ST boundaries: {boundaries}", fg='yellow')
         return boundaries
 
     def _generate_quintic_speed_profile(
@@ -459,7 +462,7 @@ class MyPlanner(AbstractPlanner):
         x_ref = reference_path_provider._x_of_reference_line
         y_ref = reference_path_provider._y_of_reference_line
         heading_ref = reference_path_provider._heading_of_reference_line
-        s_total = s_ref[-1][0]  # Total longitudinal distance
+        s_total = s_ref[-1]  # Total longitudinal distance
         num_points = int(self.horizon_time.time_s/self.sampling_time.time_s) + 1
         # Output candidate path
         candidate_paths = []
@@ -511,7 +514,7 @@ class MyPlanner(AbstractPlanner):
 
         # Approximate for small angles
         wheel_base = ego_state.car_footprint.vehicle_parameters.wheel_base
-        kappa_ego = math.tan(ego_state.dynamic_car_state.tire_steering_angle) / wheel_base if wheel_base > 0 else 0.0
+        kappa_ego = math.tan(ego_state.tire_steering_angle) / wheel_base if wheel_base > 0 else 0.0
         # dl/ds  ≈  Δθ ~ ego_heading - ref_heading
         dl_start = ego_state.center.heading - theta_ref
         # d²l/ds² ≈ Δκ
@@ -590,6 +593,8 @@ class MyPlanner(AbstractPlanner):
         # and a spline QP solver to incorporate lane boundary constraints and dynamic feasibility to generate
         # a final smooth path
         # What I have is just Lattice Planner's optimal output
+        click.secho(f"Optimal path cost: {min_cost}", fg='yellow')
+        click.secho(f"Optimal path index: {optimal_path_index}", fg='yellow')
         return candidate_paths[optimal_path_index] if optimal_path_index >= 0 else ([], [], [], [])
 
     def speed_planning(
