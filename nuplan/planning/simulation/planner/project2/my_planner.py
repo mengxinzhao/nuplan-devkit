@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 class MyPlanner(AbstractPlanner):
     """
-    Planner going straight.
+    Simplified Apollo EM Planner implementation.
     """
 
     def __init__(
@@ -70,6 +70,7 @@ class MyPlanner(AbstractPlanner):
     def _compute_s_box(
         self,
         ego_length: float,
+        ego_width: float,
         ego_path_s: np.array,
         ego_path_x: np.array,
         ego_path_y: np.array,
@@ -81,38 +82,41 @@ class MyPlanner(AbstractPlanner):
         obj_heading: float,
         safety_buffer_front: float,
         safety_buffer_rear: float,
+        lateral_threshold: float
 
-    ) -> Tuple[float, float, float]:
+    ) -> Tuple[float, float, float, bool]:
         """Compute the occupancy box of track object in S-T graph and return l_offset, s_min, s_max
         """
         # Compute the s box of the object in the S-T graph
-        l_offset = 0.0  # Placeholder for lateral offset
         s_min = 0.0  # Placeholder for minimum s value
         s_max = 0.0  # Placeholder for maximum s value
 
-        # Compute distances to path points
+        # Find closest point on path
         dists = np.hypot(ego_path_x - obj_x, ego_path_y - obj_y)
         i = np.argmin(dists)
-        min_dist = dists[i]
 
         delta_theta = obj_heading - ego_heading[i]
         abs_cos_delta = np.abs(np.cos(delta_theta))
         abs_sin_delta = np.abs(np.sin(delta_theta))
-        M = np.array([[abs_cos_delta, abs_sin_delta], [abs_sin_delta, abs_cos_delta]])
-        half_dims = np.array([obj_length / 2, obj_width / 2])
-        # half effective lon, lat of object after projecting itself into Ego's heading direction
-        half_eff_long, half_eff_lat = M @ half_dims
+        # bounding box in Ego's frame
+        half_eff_long = obj_length/2 * abs_cos_delta + obj_width/2 * abs_sin_delta
+        half_eff_lat = obj_length/2 * abs_sin_delta + obj_width/2 * abs_cos_delta
 
         # Compute signed lateral offset l
         vec = np.array([obj_x - ego_path_x[i], obj_y - ego_path_y[i]])
         perp = np.array([-np.sin(ego_heading[i]), np.cos(ego_heading[i])])
         l = np.dot(vec, perp)
 
+        # Check if object is close enough laterally to be a collision risk
+        total_lat_clearance = (ego_width + obj_width) / 2.0 + lateral_threshold
+        if abs(l) > total_lat_clearance:
+            return l, 0.0, 0.0, False  # Too far laterally
+
         s = ego_path_s[i]
         s_min = s - half_eff_long - ego_length / 2 - safety_buffer_rear
         s_max = s + half_eff_long + ego_length / 2 + safety_buffer_front
 
-        return l, s_min, s_max
+        return l, s_min, s_max, True
 
     def _compute_st_boundaries(
         self,
@@ -123,7 +127,7 @@ class MyPlanner(AbstractPlanner):
         path_heading: List[float],
         path_idx2s: List[float],
         time_stamps: List[float]
-    ) -> List[Tuple[float, float]]:
+    ) -> List[List[Tuple[float, float]]]:
         """Compute feasible ST region considering obstacles."""
 
         # in meters
@@ -141,8 +145,9 @@ class MyPlanner(AbstractPlanner):
 
         for _, tracked in enumerate(tracked_objects):
             if not tracked.predictions:
-                l, s_min, s_max = self._compute_s_box(
+                l, s_min, s_max, is_valid = self._compute_s_box(
                     ego_length,
+                    ego_width,
                     path_idx2s_np,
                     path_x_np,
                     path_y_np,
@@ -154,8 +159,9 @@ class MyPlanner(AbstractPlanner):
                     tracked.box.heading,
                     safety_buffer_front,
                     safety_buffer_rear,
+                    lateral_threshold
                 )
-                if abs(l) > lateral_threshold:
+                if not is_valid:
                     continue
 
                 for t_idx in range(len(time_stamps)):
@@ -166,8 +172,9 @@ class MyPlanner(AbstractPlanner):
                 for t_idx, waypoint in enumerate(prediction.waypoints):
                     if t_idx >= len(boundaries):
                         break
-                    l, s_min, s_max = self._compute_s_box(
+                    l, s_min, s_max, is_valid = self._compute_s_box(
                         ego_length,
+                        ego_width,
                         path_idx2s_np,
                         path_x_np,
                         path_y_np,
@@ -179,9 +186,10 @@ class MyPlanner(AbstractPlanner):
                         waypoint.oriented_box.center.heading,
                         safety_buffer_front,
                         safety_buffer_rear,
+                        lateral_threshold
                     )
 
-                    if abs(l) > lateral_threshold:
+                    if not is_valid:
                         continue
 
                     boundaries[t_idx].append((s_min, s_max))
@@ -263,7 +271,7 @@ class MyPlanner(AbstractPlanner):
 
     def _check_speed_profile_constraints(
         self, profile: dict, max_v: float, max_a: float, max_d: float,
-        st_boundaries: List[Tuple[float, float]], s_max: float
+        st_boundaries: List[List[Tuple[float, float]]], s_max: float
     ) -> bool:
         """Check if speed profile satisfies all constraints."""
         for i, (s, v, a) in enumerate(zip(profile['s'], profile['v'], profile['a'])):
@@ -288,13 +296,18 @@ class MyPlanner(AbstractPlanner):
         return True
 
     def _compute_speed_profile_cost(
-        self, profile: dict, target_v: float, max_v: float
+        self,
+        profile: dict,
+        target_v: float,
+        max_v: float,
+        st_boundaries: List[List[Tuple[float, float]]],
     ) -> float:
         """Compute cost for a speed profile."""
         # Cost components
-        w_accel = 1.0  # Weight for acceleration
-        w_jerk = 0.5   # Weight for jerk
+        w_accel = 0.5  # Weight for acceleration
+        w_jerk = 1.0   # Weight for jerk
         w_speed = 0.5  # Weight for speed tracking
+        safety_margin = 0.5
 
         cost = 0.0
 
@@ -307,12 +320,31 @@ class MyPlanner(AbstractPlanner):
             dt = profile['t'][1] - profile['t'][0] if len(profile['t']) > 1 else 0.1
             jerk = [(profile['a'][i+1] - profile['a'][i])/dt 
                     for i in range(len(profile['a'])-1)]
-            jerk_cost = sum([j**2 for j in jerk])
-            cost += w_jerk * jerk_cost
+            jerk_sum = sum([j**2 for j in jerk])
+            cost += w_jerk * jerk_sum
 
         # Speed tracking cost (efficiency)
         speed_cost = sum([(v - target_v)**2 for v in profile['v']])
         cost += w_speed * speed_cost
+
+        # safety
+        for i, s in enumerate(profile['s']):
+            if i >= len(st_boundaries) or not st_boundaries[i]:
+                continue
+
+            for s_min, s_max in st_boundaries[i]:
+                # Distance to obstacle
+                if s < s_min:
+                    clearance = s_min - s
+                elif s > s_max:
+                    clearance = s - s_max
+                else:
+                    # Collision!
+                    return np.inf
+
+                # Exponential penalty as clearance decreases
+                if clearance < safety_margin:
+                    cost += np.exp(-clearance) * 10.0
 
         return cost
 
@@ -640,8 +672,11 @@ class MyPlanner(AbstractPlanner):
 
         s_max = path_idx2s[-1] if path_idx2s else 100.0
         s0 = 0.0
-        v0 = ego_state.dynamic_car_state.rear_axle_velocity_2d.magnitude()
-        a0 = ego_state.dynamic_car_state.rear_axle_acceleration_2d.magnitude()
+        v0_vec = ego_state.dynamic_car_state.rear_axle_velocity_2d
+        v0 = v0_vec.magnitude()
+        a0_vec = ego_state.dynamic_car_state.rear_axle_acceleration_2d
+        # project acceleration onto velocity direction
+        a0 = (a0_vec.x * v0_vec.x + a0_vec.y * v0_vec.y) / v0 if v0 > 1e-6 else 0.0
         t_end = self.horizon_time.time_s
         dt  = self.sampling_time.time_s
         target_v = max_velocity
@@ -655,9 +690,14 @@ class MyPlanner(AbstractPlanner):
            ego_state, tracked_objects, path_x, path_y, path_heading, path_idx2s, time_stamps
         )
         # Sample end conditions
+        t_stop = min(t_end, abs(v0) / max_decel) 
+        s_min_est = max(0, v0 * t_stop + 0.5 * max_decel * t_stop**2)
+        s_max_est = min(
+          v0 * t_end + 0.5 * max_accel * t_end**2,
+          max_velocity * t_end,  # Speed limit constraint
+          s_max  # Path length constraint
+         )
         v_ends = np.linspace(0, max_velocity, num=7)
-        s_min_est = max(0, v0 * t_end + 0.5 * max_decel * t_end**2)
-        s_max_est = v0 * t_end + 0.5 * max_accel * t_end**2
         s_ends = np.linspace(s_min_est, min(s_max_est, s_max), num=15)
 
         best_profile = None
@@ -674,7 +714,7 @@ class MyPlanner(AbstractPlanner):
                 if self._check_speed_profile_constraints(
                     profile, max_velocity, max_accel, max_decel, st_boundaries, s_max
                 ):
-                    cost = self._compute_speed_profile_cost(profile, target_v, max_velocity)
+                    cost = self._compute_speed_profile_cost(profile, v_end, max_velocity, st_boundaries)
                     if cost < min_cost:
                         min_cost = cost
                         best_profile = profile
