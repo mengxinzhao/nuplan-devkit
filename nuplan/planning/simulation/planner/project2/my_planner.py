@@ -55,6 +55,7 @@ class MyPlanner(AbstractPlanner):
         self._predictor: AbstractPredictor = None
         self._reference_path_provider: Optional[ReferenceLineProvider] = None
         self._routing_complete = False
+        self.last_optimal_s, self.last_optimal_s_dot, self.last_optimal_s_2dot, self.last_optimal_t = None, None, None, None
 
     def _compute_lateral_offset(
         self, x_interp, y_interp, heading_interp, s, ego_x, ego_y
@@ -67,7 +68,7 @@ class MyPlanner(AbstractPlanner):
         perp = np.array([-np.sin(theta_s), np.cos(theta_s)])
         return np.dot(offset_vec, perp)
 
-    def _compute_s_box(
+    def _compute_st_box(
         self,
         ego_length: float,
         ego_width: float,
@@ -80,43 +81,57 @@ class MyPlanner(AbstractPlanner):
         obj_length: float,
         obj_width: float,
         obj_heading: float,
-        safety_buffer_front: float,
-        safety_buffer_rear: float,
+        safety_margin: float,
         lateral_threshold: float
 
-    ) -> Tuple[float, float, float, bool]:
-        """Compute the occupancy box of track object in S-T graph and return l_offset, s_min, s_max
+    ) -> Tuple[bool, float, float]:
         """
-        # Compute the s box of the object in the S-T graph
-        s_min = 0.0  # Placeholder for minimum s value
-        s_max = 0.0  # Placeholder for maximum s value
+        Compute the occupancy box of track object in S-T graph and return
+        is_valid, s_min, s_max
+        """
 
-        # Find closest point on path
-        dists = np.hypot(ego_path_x - obj_x, ego_path_y - obj_y)
-        i = np.argmin(dists)
+        x_interp = interp1d(ego_path_s, ego_path_x, kind='linear',
+    fill_value='extrapolate')
+        y_interp = interp1d(ego_path_s, ego_path_y, kind='linear',
+    fill_value='extrapolate')
+        heading_interp = interp1d(ego_path_s, ego_heading, kind='linear',
+    fill_value='extrapolate')
 
-        delta_theta = obj_heading - ego_heading[i]
-        abs_cos_delta = np.abs(np.cos(delta_theta))
-        abs_sin_delta = np.abs(np.sin(delta_theta))
-        # bounding box in Ego's frame
-        half_eff_long = obj_length/2 * abs_cos_delta + obj_width/2 * abs_sin_delta
-        half_eff_lat = obj_length/2 * abs_sin_delta + obj_width/2 * abs_cos_delta
+        # Find the closest point on the path using minimize
+        def distance_to_obj(s):
+            x_s = x_interp(s)
+            y_s = y_interp(s)
+            return (obj_x - x_s)**2 + (obj_y - y_s)**2
 
-        # Compute signed lateral offset l
-        vec = np.array([obj_x - ego_path_x[i], obj_y - ego_path_y[i]])
-        perp = np.array([-np.sin(ego_heading[i]), np.cos(ego_heading[i])])
+        result = minimize_scalar(
+            distance_to_obj,
+            bounds=(ego_path_s[0], ego_path_s[-1]),
+            method='bounded'
+        )
+        s_closest = float(result.x)
+
+        # Get interpolated values at the closest point
+        x_closest = x_interp(s_closest)
+        y_closest = y_interp(s_closest)
+        heading_closest = heading_interp(s_closest)
+
+        # Compute signed lateral offset from path
+        vec = np.array([obj_x - x_closest, obj_y - y_closest])
+        perp = np.array([-np.sin(heading_closest), np.cos(heading_closest)])
         l = np.dot(vec, perp)
 
         # Check if object is close enough laterally to be a collision risk
-        total_lat_clearance = (ego_width + obj_width) / 2.0 + lateral_threshold
+        total_lat_clearance =  lateral_threshold
         if abs(l) > total_lat_clearance:
-            return l, 0.0, 0.0, False  # Too far laterally
+            return False, -1, -1
 
-        s = ego_path_s[i]
-        s_min = s - half_eff_long - ego_length / 2 - safety_buffer_rear
-        s_max = s + half_eff_long + ego_length / 2 + safety_buffer_front
+        # Compute s bounds for the obstacle's actual position
+        # s_closest is where the obstacle projects onto the path
+        # The obstacle extends from this point by half_eff_long in both directions
+        s_min = s_closest - obj_length/2 - safety_margin
+        s_max = s_closest + obj_length/2 + safety_margin
 
-        return l, s_min, s_max, True
+        return True, s_min, s_max
 
     def _compute_st_boundaries(
         self,
@@ -126,16 +141,16 @@ class MyPlanner(AbstractPlanner):
         path_y: List[float],
         path_heading: List[float],
         path_idx2s: List[float],
-        time_stamps: List[float]
+        time_stamps: List[float],
+        safety_margin: float,
     ) -> List[List[Tuple[float, float]]]:
+
         """Compute feasible ST region considering obstacles."""
 
         # in meters
         ego_length = ego_state.car_footprint.vehicle_parameters.length
         ego_width = ego_state.car_footprint.vehicle_parameters.width
-        safety_buffer_front = 5.0  # safety distance in front
-        safety_buffer_rear = 5.0  # safety distance behind
-        lateral_threshold = 5.0  # lateral distance to consider obstacles/collision risk
+        lateral_threshold = ego_width  # lateral distance to consider obstacles/collision risk
 
         boundaries = [[] for _ in range(len(time_stamps))]
         path_x_np = np.array(path_x)
@@ -143,9 +158,17 @@ class MyPlanner(AbstractPlanner):
         path_heading_np = np.array(path_heading)
         path_idx2s_np = np.array(path_idx2s)
 
+        # Estimate minimum possible s at each time (ego can't go backwards)
+        s_min_possible = [0.0] * len(time_stamps)
+        # Estimate maximum possible s at each time (limited by max velocity)
+        s_max_possible = [
+            min(self.max_velocity * time_stamps[i], path_idx2s_np[-1])
+            for i in range(len(time_stamps))
+        ]
+
         for _, tracked in enumerate(tracked_objects):
             if not tracked.predictions:
-                l, s_min, s_max, is_valid = self._compute_s_box(
+                is_valid, s_min, s_max = self._compute_st_box(
                     ego_length,
                     ego_width,
                     path_idx2s_np,
@@ -157,22 +180,25 @@ class MyPlanner(AbstractPlanner):
                     tracked.box.length,
                     tracked.box.width,
                     tracked.box.heading,
-                    safety_buffer_front,
-                    safety_buffer_rear,
-                    lateral_threshold
+                    safety_margin=safety_margin,
+                    lateral_threshold=lateral_threshold,
                 )
                 if not is_valid:
                     continue
 
                 for t_idx in range(len(time_stamps)):
-                    boundaries[t_idx].append((s_min, s_max))
+                    if (
+                        s_max >= s_min_possible[t_idx]
+                        and s_min <= s_max_possible[t_idx]
+                    ):
+                        boundaries[t_idx].append((s_min, s_max))
             else:
                 # dynamic object
                 prediction = tracked.predictions[0]  # PredictedTrajectory
                 for t_idx, waypoint in enumerate(prediction.waypoints):
                     if t_idx >= len(boundaries):
                         break
-                    l, s_min, s_max, is_valid = self._compute_s_box(
+                    is_valid, s_min, s_max = self._compute_st_box(
                         ego_length,
                         ego_width,
                         path_idx2s_np,
@@ -184,14 +210,13 @@ class MyPlanner(AbstractPlanner):
                         waypoint.oriented_box.length,
                         waypoint.oriented_box.width,
                         waypoint.oriented_box.center.heading,
-                        safety_buffer_front,
-                        safety_buffer_rear,
-                        lateral_threshold
+                        safety_margin=safety_margin,
+                        lateral_threshold=lateral_threshold,
                     )
 
                     if not is_valid:
                         continue
-
+                if s_max >= s_min_possible[t_idx] and s_min <= s_max_possible[t_idx]:
                     boundaries[t_idx].append((s_min, s_max))
 
         # Merge intervals for each time step
@@ -208,14 +233,14 @@ class MyPlanner(AbstractPlanner):
                         merged.append(current)
                 boundaries[t_idx] = merged
 
-        click.secho(f"ST boundaries: {boundaries}", fg='yellow')
+        # click.secho(f"ST boundaries: {boundaries}", fg='blue')
         return boundaries
 
     def _generate_quintic_speed_profile(
         self,
         s0: float,
         v0: float,
-        a0: float,
+        accel0: float,
         s_end: float,
         v_end: float,
         a_end: float,
@@ -226,7 +251,7 @@ class MyPlanner(AbstractPlanner):
         # Quintic polynomial: s(t) = a0 + a1*t + a2*t² + a3*t³ + a4*t⁴ + a5*t⁵
         a0 = s0
         a1 = v0
-        a2 = a0 / 2.0
+        a2 = accel0 / 2.0
 
         # Solve for remaining coefficients using boundary conditions
         t = t_end
@@ -243,7 +268,8 @@ class MyPlanner(AbstractPlanner):
 
         try:
             a3, a4, a5 = np.linalg.solve(A, b)
-        except np.linalg.LinAlgError:
+        except np.linalg.LinAlgError as e:
+            click.secho(f"Failed to solve for quintic coefficients: {e}", fg="red")
             return None
 
         # Generate profile
@@ -276,7 +302,7 @@ class MyPlanner(AbstractPlanner):
         """Check if speed profile satisfies all constraints."""
         for i, (s, v, a) in enumerate(zip(profile['s'], profile['v'], profile['a'])):
             # Velocity constraint
-            if v < 0 or v > max_v:
+            if v > max_v:
                 return False
 
             # Acceleration constraint
@@ -288,7 +314,7 @@ class MyPlanner(AbstractPlanner):
                 return False
 
             # ST boundary constraint
-            if i < len(st_boundaries) and st_boundaries[i]:
+            if i < len(st_boundaries) and len(st_boundaries[i]) > 0:
                 for (s_min, s_max) in st_boundaries[i]:
                     if s_min <= s <= s_max:
                         return False
@@ -299,7 +325,7 @@ class MyPlanner(AbstractPlanner):
         self,
         profile: dict,
         target_v: float,
-        max_v: float,
+        safety_margin: float,
         st_boundaries: List[List[Tuple[float, float]]],
     ) -> float:
         """Compute cost for a speed profile."""
@@ -307,7 +333,6 @@ class MyPlanner(AbstractPlanner):
         w_accel = 0.5  # Weight for acceleration
         w_jerk = 1.0   # Weight for jerk
         w_speed = 0.5  # Weight for speed tracking
-        safety_margin = 0.5
 
         cost = 0.0
 
@@ -340,11 +365,11 @@ class MyPlanner(AbstractPlanner):
                     clearance = s - s_max
                 else:
                     # Collision!
-                    return np.inf
+                    return 1e-9
 
                 # Exponential penalty as clearance decreases
                 if clearance < safety_margin:
-                    cost += np.exp(-clearance) * 10.0
+                    cost += np.exp(safety_margin-clearance) * 10.0
 
         return cost
 
@@ -526,7 +551,7 @@ class MyPlanner(AbstractPlanner):
         y_interp = reference_path_provider._interp1d_y
         heading_interp = reference_path_provider._interp1d_heading
 
-        # use minimize solver to find the closest point on reference line
+        # Use minimize solver to find the closest point on reference line
         # TODO: Does this guarantee the trajectory planning consistency?
         def objective(s):
             # Compute the cost of a given lateral offset
@@ -590,6 +615,9 @@ class MyPlanner(AbstractPlanner):
         def dddf(s, a3, a4, a5):
             return 60 * a5 * s**2 + 24 * a4 * s + 6 * a3
 
+        # TODO: 1. generate SL graph first and find a feasible path through QP optimization
+        # and 2. calculate cost and pick up the best one. The opposite of what I do here seems
+        # more effective
         optimal_path = ([], [], [], [])
         for s in s_samples:
             if s > s_total - s_start:
@@ -669,14 +697,38 @@ class MyPlanner(AbstractPlanner):
         max_accel = 2.0  # m/s² - comfortable acceleration
         max_decel = -4.0  # m/s² - comfortable deceleration
         max_jerk = 2.0  # m/s³ - jerk limit for comfort
+        safety_margin = 0.5  # meters
 
-        s_max = path_idx2s[-1] if path_idx2s else 100.0
-        s0 = 0.0
+        ego_x = ego_state.center.x
+        ego_y = ego_state.center.y
+
+        # TODO: Cut the code duplication
+        x_interp = interp1d(path_idx2s, path_x, kind="linear", fill_value="extrapolate")
+        y_interp = interp1d(path_idx2s, path_y, kind="linear", fill_value="extrapolate")
+        heading_interp = interp1d(
+            path_idx2s, path_heading, kind="linear", fill_value="extrapolate"
+        )
+
+        # Find closest point on path to get initial s
+        def distance_to_ego(s):
+            x_s = x_interp(s)
+            y_s = y_interp(s)
+            return (ego_x - x_s) ** 2 + (ego_y - y_s) ** 2
+
+        result = minimize_scalar(
+            distance_to_ego, bounds=(path_idx2s[0], path_idx2s[-1]), method="bounded"
+        )
+        s0 = path_idx2s[0]  # Initial s-coordinate on path
+        s_max = path_idx2s[-1]
+        # Get path heading at ego's position
+        path_heading_at_ego = heading_interp(s0)
+        tangent = np.array([np.cos(path_heading_at_ego), np.sin(path_heading_at_ego)])
         v0_vec = ego_state.dynamic_car_state.rear_axle_velocity_2d
-        v0 = v0_vec.magnitude()
+        v0 = np.dot(v0_vec.array, tangent)
+
         a0_vec = ego_state.dynamic_car_state.rear_axle_acceleration_2d
         # project acceleration onto velocity direction
-        a0 = (a0_vec.x * v0_vec.x + a0_vec.y * v0_vec.y) / v0 if v0 > 1e-6 else 0.0
+        a0 = np.dot(a0_vec.array, tangent)
         t_end = self.horizon_time.time_s
         dt  = self.sampling_time.time_s
         target_v = max_velocity
@@ -687,7 +739,7 @@ class MyPlanner(AbstractPlanner):
 
         # Generate ST graph boundaries considering obstacles
         st_boundaries = self._compute_st_boundaries(
-           ego_state, tracked_objects, path_x, path_y, path_heading, path_idx2s, time_stamps
+           ego_state, tracked_objects, path_x, path_y, path_heading, path_idx2s, time_stamps, safety_margin
         )
         # Sample end conditions
         t_stop = min(t_end, abs(v0) / max_decel) 
@@ -697,13 +749,18 @@ class MyPlanner(AbstractPlanner):
           max_velocity * t_end,  # Speed limit constraint
           s_max  # Path length constraint
          )
-        v_ends = np.linspace(0, max_velocity, num=7)
+        click.secho(f"Speed planning s0: {s0:.3f}, v0: {v0:.3f}, a0: {a0:.3f}", fg="blue")
+        v_ends = np.linspace(0, max_velocity, num = 15)
         s_ends = np.linspace(s_min_est, min(s_max_est, s_max), num=15)
 
         best_profile = None
         min_cost = np.inf
+        best_v_end = None
+        best_s_end = None
 
-        # total sampled profiles are 7 * 15
+        # Total sampled profiles are 7 * 15
+        # TODO: 1. generate ST graph first and find a feasible path through QP optimization
+        # and 2. calculate cost and pick up the best one
         for v_end in v_ends:
             for s_end in s_ends:
                 profile = self._generate_quintic_speed_profile(
@@ -712,21 +769,34 @@ class MyPlanner(AbstractPlanner):
                 if profile is None:
                     continue
                 if self._check_speed_profile_constraints(
-                    profile, max_velocity, max_accel, max_decel, st_boundaries, s_max
+                    profile, target_v, max_accel, max_decel, st_boundaries, s_max
                 ):
-                    cost = self._compute_speed_profile_cost(profile, v_end, max_velocity, st_boundaries)
+                    cost = self._compute_speed_profile_cost(profile, v_end, safety_margin, st_boundaries)
                     if cost < min_cost:
                         min_cost = cost
                         best_profile = profile
+                        best_v_end = v_end
+                        best_s_end = s_end
+                        click.secho(f"New best profile found with cost {min_cost:.2f}, {best_s_end=}, {best_v_end=}", fg="green")
 
         if best_profile is None:
-            optimal_s, optimal_s_dot, optimal_s_2dot, optimal_t = self._generate_fallback_speed_profile(
-                v0, s_max, t_end, dt
-            )
+            click.secho("best_profile is None. Use last planned speed profile", fg="red")
+
+            if self.last_optimal_s is None:
+                optimal_s, optimal_s_dot, optimal_s_2dot, optimal_t = self._generate_fallback_speed_profile(
+                    v0, s_max, t_end, dt
+                )
+            else:
+                optimal_s, optimal_s_dot, optimal_s_2dot, optimal_t = self.last_optimal_s[1:], self.last_optimal_s_dot[1:], self.last_optimal_s_2dot[1:], self.last_optimal_t[1:]
+            # linear extend
+            optimal_s.append(optimal_s[-1] + optimal_s_dot[-1] * self.sampling_time.time_s)
+            optimal_s_dot.append(optimal_s_2dot[-1])
+            optimal_s_2dot.append(optimal_s_2dot[-1])
+            optimal_t.append(optimal_t[-1] + self.sampling_time.time_s)
         else:
-            optimal_s = best_profile['s']
-            optimal_s_dot = best_profile['v']
-            optimal_s_2dot = best_profile['a']
-            optimal_t = best_profile['t']
+            optimal_s = self.last_optimal_s = best_profile['s']
+            optimal_s_dot = self.last_optimal_s_dot = best_profile['v']
+            optimal_s_2dot = self.last_optimal_s_2dot = best_profile['a']
+            optimal_t = self.last_optimal_t = best_profile['t']
 
         return optimal_s, optimal_s_dot, optimal_s_2dot, optimal_t

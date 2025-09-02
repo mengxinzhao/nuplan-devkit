@@ -81,14 +81,13 @@ def cal_pose(
     """
     采用一维插值, 根据当前时间下的s 和 规划融合的结果 计算 x y heading kappa
     """
-    f_x = interp1d(path_idx2s, path_x)
-    f_y = interp1d(path_idx2s, path_y)
-    f_heading = interp1d(path_idx2s, path_heading)
-    f_kappa = interp1d(path_idx2s, path_kappa)
+    f_x = interp1d(path_idx2s, path_x, fill_value="extrapolate", bounds_error=False)
+    f_y = interp1d(path_idx2s, path_y, fill_value="extrapolate", bounds_error=False)
+    f_heading = interp1d(path_idx2s, path_heading, fill_value="extrapolate", bounds_error=False)
+    f_kappa = interp1d(path_idx2s, path_kappa, fill_value="extrapolate", bounds_error=False)
     x = f_x(s)
     y = f_y(s)
     heading = f_heading(s)
     kappa = f_kappa(s)
-
 
     return x, y, heading, kappa
