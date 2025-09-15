@@ -4,7 +4,8 @@ import time
 from pathlib import Path
 import tempfile
 import hydra
-from nuplan.planning.simulation.planner.project2.my_planner import MyPlanner
+from nuplan.planning.simulation.planner.project2.my_planner import FrenetOptimalTrajectoryPlanner
+
 # from nuplan.planning.simulation.planner.simple_planner import SimplePlanner
 from nuplan.planning.simulation.planner.idm_planner import IDMPlanner
 from tutorials.utils.tutorial_utils import construct_simulation_hydra_paths
@@ -48,8 +49,8 @@ DATASET_PARAMS = [
     "scenario_filter.log_names=['2021.07.16.00.51.05_veh-17_01352_01901']",  # following_lane_without_lead
     "scenario_filter.scenario_tokens=['628313fbe48550ac']",
 
-    "scenario_filter.log_names=['2021.08.17.16.57.11_veh-08_01200_01636']",  # following_lane_without_lead
-    "scenario_filter.scenario_tokens=['6ec306ff06e35a17']",
+    # "scenario_filter.log_names=['2021.08.17.16.57.11_veh-08_01200_01636']",  # following_lane_without_lead
+    # "scenario_filter.scenario_tokens=['6ec306ff06e35a17']",
 
     # "scenario_filter.log_names=['2021.05.12.22.28.35_veh-35_00620_01164']",  # following_lane_with_slow_lead
     # "scenario_filter.scenario_tokens=['1971267bb0135ef5']",
@@ -60,8 +61,8 @@ DATASET_PARAMS = [
     # "scenario_filter.log_names=['2021.08.17.18.54.02_veh-45_00665_01065']",  # starting_unprotected_cross_turn
     # "scenario_filter.scenario_tokens=['7ff1de6b23035dc8']",
 
-    "scenario_filter.log_names=['2021.09.16.15.12.03_veh-42_01037_01434']",  # starting_left_turn
-    "scenario_filter.scenario_tokens=['3ec8944f0e5a5637']",
+    # "scenario_filter.log_names=['2021.09.16.15.12.03_veh-42_01037_01434']",  # starting_left_turn
+    # "scenario_filter.scenario_tokens=['3ec8944f0e5a5637']",
 
     # "scenario_filter.log_names=['2021.10.05.07.10.04_veh-52_01442_01802']",   # starting_unprotected_cross_turn
     # "scenario_filter.scenario_tokens=['40cef783435759d3']",
@@ -112,7 +113,7 @@ from nuplan.planning.script.run_simulation import run_simulation as main_simulat
 
 # planner = SimplePlanner(horizon_seconds=10.0, sampling_time=0.25, acceleration=[0.0, 0.0])
 # planner = IDMPlanner(target_velocity=10.0, min_gap_to_lead_agent=1.0, headway_time=1.5, accel_max=1.0, decel_max=3.0, planned_trajectory_samples=16, planned_trajectory_sample_interval=0.5, occupancy_map_radius=40)
-planner = MyPlanner(horizon_seconds=8.0, sampling_time=0.25, max_velocity=17)
+planner = FrenetOptimalTrajectoryPlanner(horizon_seconds=4.0, sampling_time=0.25, max_velocity=17)
 
 # Run the simulation loop (real-time visualization not yet supported, see next section for visualization)
 main_simulation(cfg, planner)

@@ -39,6 +39,7 @@ class SimplePredictor(AbstractPredictor):
             ]
 
             # Constant velocity model
+            # TODO should use spline + prediction
             # probability = 1.0. trajectory length = duration / sample_time
             for object in objects:
                 current_pose = object.center
