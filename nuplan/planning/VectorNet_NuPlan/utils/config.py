@@ -1,9 +1,10 @@
 import os
 
 # Nuplan related
-DATA_PATH = '${your_local_path}/nuplan/dataset/nuplan-v1.1/splits/mini'
-MAP_PATH  = '${your_local_path}/nuplan/dataset/maps'
-SAVE_PATH = '${your_local_path}/VectorNet_NuPlan/processed_data'
+ROOT_DIR = os.path.join(os.environ['HOME'], "Source")
+DATA_PATH = f"{ROOT_DIR}/nuplan/dataset/nuplan-v1.1/splits/mini"
+MAP_PATH  = f"{ROOT_DIR}/nuplan/dataset/maps"
+SAVE_PATH = f"{ROOT_DIR}/nuplan-devkit/nuplan/planning/VectorNet_NuPlan/processed_data"
 MAP_VERSION = "nuplan-maps-v1.0"
 SCENARIOS_PER_TYPE = 2000
 TOTAL_SCENARIOS = 6000
