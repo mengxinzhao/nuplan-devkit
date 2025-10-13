@@ -15,6 +15,7 @@ from typing import Tuple, List, Union
 import numpy as np
 import bisect
 import math
+import copy
 
 
 class LateralMovement(Enum):
@@ -27,8 +28,8 @@ class LongitudinalMovement(Enum):
     VELOCITY_KEEPING = auto()
 
 
-# Thresholds to consider high speed 60mph
-HIGH_SPEED_VELOCITY_THRESHOLD_MPS = 26.8224
+# Thresholds to consider high speed 5mps
+HIGH_SPEED_VELOCITY_THRESHOLD_MPS = 5
 
 
 @dataclass
@@ -50,7 +51,7 @@ class CostWeight:
 @dataclass
 class LowSpeedStrategyConfiguration:
     width_sampling_m: float = field(default=0.2)
-    # 2.2 mph a sample interval
+    # 0.5 mps a sample interval
     speed_sampling_mps: float = field(default=0.5)
     num_speed_samples: int = 10
     stop_distance_m: float = field(default=5.0)
@@ -63,9 +64,9 @@ class LowSpeedStrategyConfiguration:
 @dataclass
 class HighSpeedStrategyConfiguration:
     width_sampling_m: float = field(default=0.25)
-    # 5 mph a sample interval
-    speed_sampling_mps: float = field(default=2.2352)
-    num_speed_samples: int = 10
+    # 1 mps a sample interval
+    speed_sampling_mps: float = field(default=1)
+    num_speed_samples: int = 5
     stop_distance_m: float = field(default=25.0)
     # stop point sampling length
     stop_sampling_m: float = field(default=2.0)
@@ -114,7 +115,6 @@ class LateralMovementStrategy:
         )
         delta_theta = np.arctan2(frenet_path.d_d, one_minus_kappa_r_d)
         cos_delta_theta = np.cos(delta_theta)
-        theta = np.arctan2(np.sin(delta_theta + ref_theta), np.cos(delta_theta + ref_theta))
 
         delta_theta_prime = one_minus_kappa_r_d / cos_delta_theta * frenet_path.kappa - ref_kappa
         kappa_r_d_prime = (ref_dkappa) * frenet_path.d + ref_kappa * d_dot
@@ -123,9 +123,6 @@ class LateralMovementStrategy:
             frenet_path.s_dd * one_minus_kappa_r_d / cos_delta_theta
             + np.power(frenet_path.s_d, 2) / cos_delta_theta * (frenet_path.d_d * delta_theta_prime - kappa_r_d_prime)
         )
-        # Print the two components separately
-        print(f"Component 1 (s_dd term) first 5: {(frenet_path.s_dd * one_minus_kappa_r_d / cos_delta_theta)[:5]}")
-        print(f"Component 2 (s_d^2 term) first 5: {(np.power(frenet_path.s_d, 2) / cos_delta_theta * (frenet_path.d_d * delta_theta_prime - kappa_r_d_prime))[:5]}")
 
         return frenet_path
 
@@ -134,8 +131,7 @@ class HighSpeedLateralMovementStrategy(LateralMovementStrategy):
     def calc_lateral_trajectory(
         self, fp: FrenetPath, d0: float, d_d0: float, d_dd0: float, di: float,  Ti: float
     ) -> FrenetPath:
-        # why deepcopy?
-        # tp = copy.deepcopy(fp)
+        tp = copy.deepcopy(fp)
         s_d0 = fp.s_d[0]
         s_dd0 = fp.s_dd[0]
         # d'(t) = d'(s) * s'(t)
@@ -146,10 +142,10 @@ class HighSpeedLateralMovementStrategy(LateralMovementStrategy):
             d0, d_d0 * s_d0, d_dd0 * s_d0**2 + d_d0 * s_dd0, di, 0.0, 0.0, Ti
         )
         # reset frenet_path lateral values
-        fp.d = []
-        fp.d_d = []
-        fp.d_dd = []
-        fp.d_ddd = []
+        tp.d = []
+        tp.d_d = []
+        tp.d_dd = []
+        tp.d_ddd = []
 
         # Calculate all derivatives in a single loop to reduce iterations
         for i in range(len(fp.t)):
@@ -157,7 +153,7 @@ class HighSpeedLateralMovementStrategy(LateralMovementStrategy):
             s_d = fp.s_d[i]
             s_dd = fp.s_dd[i]
 
-            s_d_inv = 1.0 / (s_d + 1e-6) + 1e-6  # Avoid division by zero
+            s_d_inv = 1.0 / (s_d + 1e-6)   # Avoid division by zero
             s_d_inv_sq = s_d_inv * s_d_inv  # Square of inverse
 
             d = lat_qp.interpolate(t)
@@ -165,19 +161,26 @@ class HighSpeedLateralMovementStrategy(LateralMovementStrategy):
             d_dd = lat_qp.interpolate_second_derivative(t)
             d_ddd = lat_qp.interpolate_third_derivative(t)
 
-            fp.d.append(d)
-            # d'(s) = d'(t) / s'(t)
-            fp.d_d.append(d_d * s_d_inv)
+            tp.d.append(d)
+            # d'(s) = d'(t) / s'(t) and clip
+            d_d_s = d_d * s_d_inv
+            # d_d_s = np.clip(d_d_s, -0.2, 0.2) 
+            tp.d_d.append(d_d_s)
             # d''(s) = (d''(t) - d'(s) * s''(t)) / s'(t)^2
-            fp.d_dd.append((d_dd - fp.d_d[i] * s_dd) * s_d_inv_sq)
-            fp.d_ddd.append(d_ddd)
-        return fp
+            tp.d_dd.append((d_dd - fp.d_d[i] * s_dd) * s_d_inv_sq)
+            tp.d_ddd.append(d_ddd)
+        print(f"d: {tp.d[:5]}")
+        print(f"d_d: {tp.d_d[:5]}")
+        print(f"d_dd: {tp.d_dd[:5]}")
+
+        return tp
 
 
 class LowSpeedLateralMovementStrategy(LateralMovementStrategy):
     def calc_lateral_trajectory(
         self, fp: FrenetPath, d0: float, d_d0: float, d_dd0: float, di: float,  Ti: float
     ) -> FrenetPath:
+        tp = copy.deepcopy(fp)
         s0 = fp.s[0]
         s1 = fp.s[-1]
         # d = d(s), d_d = d'(s), d_dd = d''(s)
@@ -185,11 +188,17 @@ class LowSpeedLateralMovementStrategy(LateralMovementStrategy):
         # lateral trajectory in respect to arch s
         lat_qp = QuinticPolynomial(d0, d_d0, d_dd0, di, 0.0, 0.0, s1 - s0)
 
-        fp.d = [lat_qp.interpolate(s - s0) for s in fp.s]
-        fp.d_d = [lat_qp.interpolate_derivative(s - s0) for s in fp.s]
-        fp.d_dd = [lat_qp.interpolate_second_derivative(s - s0) for s in fp.s]
-        fp.d_ddd = [lat_qp.interpolate_third_derivative(s - s0) for s in fp.s]
-        return fp
+        tp.d = [lat_qp.interpolate(s - s0) for s in fp.s]
+        tp.d_d = [lat_qp.interpolate_derivative(s - s0) for s in fp.s]
+        tp.d_dd = [lat_qp.interpolate_second_derivative(s - s0) for s in fp.s]
+        tp.d_ddd = [lat_qp.interpolate_third_derivative(s - s0) for s in fp.s]
+
+        print(f"{di=}, {Ti=}")
+        print(f"s range: {s0:.2f} to {s1:.2f}, distance: {s1-s0:.2f}")
+        print(f"d: {tp.d}")
+        print(f"d_d: {tp.d_d}")
+        print(f"d_dd: {tp.d_dd}")
+        return tp
 
 
 class LongitudinalMovementStrategy:
@@ -223,11 +232,13 @@ class LongitudinalMovementStrategy:
         Get the lateral offset sample range
         """
         # localize s0 in reference_line
-        s0_index = bisect.bisect(reference_line_provider._s_of_reference_line, s0)
-        left_bound = reference_line_provider._lb_of_reference_line[s0_index]
-        right_bound = reference_line_provider._rb_of_reference_line[s0_index]
+        # s0_index = bisect.bisect(reference_line_provider._s_of_reference_line, s0)
+        # left_bound = reference_line_provider._lb_of_reference_line[s0_index]
+        # right_bound = reference_line_provider._rb_of_reference_line[s0_index]
         # have to count for half body width
-        return np.arange(-right_bound + 1, left_bound - 1, strategy_config.width_sampling_m)
+        # return np.arange(-right_bound + 1, left_bound - 1, strategy_config.width_sampling_m)
+        return np.array([-0.25,  0,  0.25])
+
 
     def calc_destination_cost(
         self,
@@ -259,7 +270,7 @@ class VelocityKeepingLongitudinalMovementStrategy(LongitudinalMovementStrategy):
         fplist = []
         for target_v in np.arange(
             max(0, target_speed - strategy_config.speed_sampling_mps * strategy_config.num_speed_samples),
-            target_speed + strategy_config.speed_sampling_mps * strategy_config.num_speed_samples,
+            target_speed + strategy_config.speed_sampling_mps,
             strategy_config.speed_sampling_mps,
         ):
             fp = FrenetPath()
@@ -270,7 +281,7 @@ class VelocityKeepingLongitudinalMovementStrategy(LongitudinalMovementStrategy):
             fp.s_dd = [lon_qp.interpolate_second_derivative(t) for t in fp.t]
             fp.s_ddd = [lon_qp.interpolate_third_derivative(t) for t in fp.t]
             fplist.append(fp)
-            # print(f"{target_v=}\nfp.s_dd: {fp.s_dd}")
+            print(f"{target_v=}\nfp.s_d: {fp.s_d}")
         return fplist
 
     def calc_destination_cost(

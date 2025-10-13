@@ -45,7 +45,7 @@ class ReferenceLineProvider():
         self._x_of_reference_line = []
         self._y_of_reference_line = []
         delta_s = 1
-        length_forward = 200
+        length_forward = 300
         length_backward = 30 # 导航路径不一定能满足
 
         # find the nearest point of ego on path
@@ -74,12 +74,13 @@ class ReferenceLineProvider():
         i = ego_idx_of_path
         j = i + 1
         for s in range(0, length_forward, delta_s):
-            while not(self._s_of_path[i] <= s and self._s_of_path[j] >= s):
+            while j < len(self._s_of_path) and not(self._s_of_path[i] <= s and self._s_of_path[j] >= s):
                 i += 1
                 j += 1
-                if j==len(self._s_of_path):
-                    logger.error('Can not continue sample forward, s: %f, path_start_s: %f, path_end_s:%f', \
-                                  s, self._s_of_path[0], self._s_of_path[-1])
+            if j>=len(self._s_of_path):
+                logger.error('Can not continue sample forward, s: %f, path_start_s: %f, path_end_s:%f', \
+                                s, self._s_of_path[0], self._s_of_path[-1])
+                break
             x = self.cal_point_in_line(self._s_of_path[i], self._discrete_path[i].x, self._s_of_path[j],\
                                   self._discrete_path[j].x, s)
             y = self.cal_point_in_line(self._s_of_path[i], self._discrete_path[i].y, self._s_of_path[j],\
@@ -96,12 +97,13 @@ class ReferenceLineProvider():
         j = ego_idx_of_path
         i = j - 1
         for s in range(-delta_s, -length_backward, -delta_s):
-            while not(self._s_of_path[i] <= s and self._s_of_path[j] >= s):
+            while i >= 0 and not(self._s_of_path[i] <= s and self._s_of_path[j] >= s):
                 i -= 1
                 j -= 1
-                if i < 0: # 如果导航路径不满足就停止
-                    break
+                # if i < 0: # 如果导航路径不满足就停止
+                #     break
             if i < 0: # 如果导航路径不满足就停止
+                logger.debug('Reached beginning of path during backward sampling')
                 break
             x = self.cal_point_in_line(self._s_of_path[i], self._discrete_path[i].x, self._s_of_path[j],\
                                   self._discrete_path[j].x, s)
@@ -119,9 +121,9 @@ class ReferenceLineProvider():
         self._interp1d_x =  interp1d(self._s_of_reference_line, self._x_of_reference_line)
         self._interp1d_y =  interp1d(self._s_of_reference_line, self._y_of_reference_line)
         self.calculate_heading()
-        self._interp1d_heading =  interp1d(self._s_of_reference_line, self._heading_of_reference_line)
+        self._interp1d_heading =  interp1d(self._s_of_reference_line, self._heading_of_reference_line, fill_value='extrapolate')
         self.calculate_kappa()
-        self._interp1d_kappa =  interp1d(self._s_of_reference_line, self._kappa_of_reference_line)
+        self._interp1d_kappa =  interp1d(self._s_of_reference_line, self._kappa_of_reference_line,fill_value='extrapolate')
 
 
     def cal_point_in_line(self, x1, y1, x2, y2, x3):

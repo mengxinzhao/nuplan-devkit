@@ -271,8 +271,11 @@ def cal_project_point_by_s(
     """
     # 先找匹配点的编号
     match_index = 0
-    while frenet_path_s[match_index] < s:
+    while match_index < len(frenet_path_s) - 1 and frenet_path_s[match_index] < s:
         match_index = match_index + 1
+    # Clamp to valid range if we've gone past the end
+    if match_index >= len(frenet_path_s):
+        match_index = len(frenet_path_s) - 1
     match_point = np.array([frenet_path_x[match_index], frenet_path_y[match_index]])
     match_point_heading = frenet_path_heading[match_index]
     match_point_kappa = frenet_path_kappa[match_index]

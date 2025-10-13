@@ -61,6 +61,8 @@ def cartesian_to_frenet(rs, rx, ry, rtheta, rkappa, rdkappa, x, y, v, a, theta, 
     d = math.copysign(math.hypot(dx, dy), cross_rd_nd)
 
     delta_theta = theta - rtheta
+    # Wrap delta_theta to [-pi, pi]
+    delta_theta = math.atan2(math.sin(delta_theta), math.cos(delta_theta))
     tan_delta_theta = math.tan(delta_theta)
     cos_delta_theta = math.cos(delta_theta)
 

@@ -11,28 +11,51 @@ from scipy.optimize import minimize_scalar
 from nuplan.common.actor_state.state_representation import StateVector2D, TimePoint
 from nuplan.common.actor_state.waypoint import Waypoint
 from nuplan.common.actor_state.vehicle_parameters import get_pacifica_parameters
-from nuplan.planning.simulation.controller.motion_model.kinematic_bicycle import KinematicBicycleModel
-from nuplan.planning.simulation.observation.observation_type import DetectionsTracks, Observation
-from nuplan.planning.simulation.planner.abstract_planner import AbstractPlanner, PlannerInitialization, PlannerInput
+from nuplan.planning.simulation.controller.motion_model.kinematic_bicycle import (
+    KinematicBicycleModel,
+)
+from nuplan.planning.simulation.observation.observation_type import (
+    DetectionsTracks,
+    Observation,
+)
+from nuplan.planning.simulation.planner.abstract_planner import (
+    AbstractPlanner,
+    PlannerInitialization,
+    PlannerInput,
+)
 from nuplan.planning.simulation.trajectory.abstract_trajectory import AbstractTrajectory
 from nuplan.common.maps.abstract_map import AbstractMap
 from nuplan.planning.simulation.planner.project2.bfs_router import BFSRouter
-from nuplan.planning.simulation.planner.project2.reference_line_provider import ReferenceLineProvider
+from nuplan.planning.simulation.planner.project2.reference_line_provider import (
+    ReferenceLineProvider,
+)
 from nuplan.planning.simulation.planner.project2.simple_predictor import SimplePredictor
-from nuplan.planning.simulation.planner.project2.abstract_predictor import AbstractPredictor
+from nuplan.planning.simulation.planner.project2.abstract_predictor import (
+    AbstractPredictor,
+)
 from nuplan.planning.simulation.planner.project2.strategy import (
     HighSpeedStrategyConfiguration,
     LowSpeedStrategyConfiguration,
     HighSpeedLateralMovementStrategy,
+    LowSpeedLateralMovementStrategy,
     HIGH_SPEED_VELOCITY_THRESHOLD_MPS,
     VelocityKeepingLongitudinalMovementStrategy,
     CostWeight,
-)  
-from nuplan.planning.simulation.planner.project2.frenet import FrenetPath, cartesian_to_frenet
+)
+from nuplan.planning.simulation.planner.project2.frenet import (
+    FrenetPath,
+    cartesian_to_frenet,
+)
 
-from nuplan.planning.simulation.planner.project2.merge_path_speed import transform_path_planning, cal_dynamic_state, cal_pose
+from nuplan.planning.simulation.planner.project2.merge_path_speed import (
+    transform_path_planning,
+    cal_dynamic_state,
+    cal_pose,
+)
 from nuplan.common.actor_state.ego_state import DynamicCarState, EgoState
-from nuplan.planning.simulation.trajectory.interpolated_trajectory import InterpolatedTrajectory
+from nuplan.planning.simulation.trajectory.interpolated_trajectory import (
+    InterpolatedTrajectory,
+)
 from nuplan.common.actor_state.state_representation import StateSE2, StateVector2D
 from nuplan.common.actor_state.agent import Agent
 from nuplan.common.actor_state.tracked_objects import TrackedObject, TrackedObjects
@@ -47,10 +70,10 @@ class FrenetOptimalTrajectoryPlanner(AbstractPlanner):
     """
 
     def __init__(
-            self,
-            horizon_seconds: float,
-            sampling_time: float,
-            max_velocity: float = 5.0,
+        self,
+        horizon_seconds: float,
+        sampling_time: float,
+        max_velocity: float = 5.0,
     ):
         """
         :param horizon_seconds: [s] time horizon being run.
@@ -61,20 +84,23 @@ class FrenetOptimalTrajectoryPlanner(AbstractPlanner):
         self.sampling_time = TimePoint(int(sampling_time * 1e6))
         self.max_velocity = max_velocity
         self.target_velocity = 10
-        self.max_accel = 3.0
-        self.max_decel = 3.0
-        self.min_turning_radius = 1.0
-        self.max_curvature = 1.0 / self.min_turning_radius
+        self.max_accel = 6.0
+        self.max_curvature = 1
         self.optimal_path = None
 
         self._router: Optional[BFSRouter] = None
         self._predictor: AbstractPredictor = None
         self._reference_path_provider: Optional[ReferenceLineProvider] = None
         self._routing_complete = False
-        self.last_optimal_s, self.last_optimal_s_dot, self.last_optimal_s_2dot, self.last_optimal_t = None, None, None, None
+        (
+            self.last_optimal_s,
+            self.last_optimal_s_dot,
+            self.last_optimal_s_2dot,
+            self.last_optimal_t,
+        ) = (None, None, None, None)
 
         # Movement strategy used in the planning
-        self._lateral_movement_strategy = HighSpeedLateralMovementStrategy()
+        self._lateral_movement_strategy = LowSpeedLateralMovementStrategy()
         self._speed_profile_strategy = VelocityKeepingLongitudinalMovementStrategy()
 
     def initialize(self, initialization: PlannerInitialization) -> None:
@@ -90,7 +116,9 @@ class FrenetOptimalTrajectoryPlanner(AbstractPlanner):
         """Inherited, see superclass."""
         return DetectionsTracks  # type: ignore
 
-    def compute_planner_trajectory(self, current_input: PlannerInput) -> AbstractTrajectory:
+    def compute_planner_trajectory(
+        self, current_input: PlannerInput
+    ) -> AbstractTrajectory:
         """
         Implement a trajectory that goes straight.
         Inherited, see superclass.
@@ -107,19 +135,28 @@ class FrenetOptimalTrajectoryPlanner(AbstractPlanner):
         self._reference_path_provider._reference_line_generate(ego_state)
 
         # 3. Objects prediction
-        self._predictor = SimplePredictor(ego_state, observations, self.horizon_time.time_s, self.sampling_time.time_s)
+        self._predictor = SimplePredictor(
+            ego_state, observations, self.horizon_time.time_s, self.sampling_time.time_s
+        )
         objects = self._predictor.predict()
 
         # 4. Planning
-        trajectory: List[EgoState] = self.planning(ego_state, self._reference_path_provider, objects,
-                                                    self.horizon_time, self.sampling_time, self.max_velocity, self.target_velocity)
+        trajectory: List[EgoState] = self.planning(
+            ego_state,
+            self._reference_path_provider,
+            objects,
+            self.horizon_time,
+            self.sampling_time,
+            self.max_velocity,
+            self.target_velocity,
+        )
 
         return InterpolatedTrajectory(trajectory)
 
     def _compute_lateral_offset(
-            self, x_interp, y_interp, heading_interp, s, ego_x, ego_y
-        ):
-        """compute lateral offset by projecting Ego(x, y) to reference line. s is the projected point's arc """
+        self, x_interp, y_interp, heading_interp, s, ego_x, ego_y
+    ):
+        """compute lateral offset by projecting Ego(x, y) to reference line. s is the projected point's arc"""
         x_s = x_interp(s)
         y_s = y_interp(s)
         theta_s = heading_interp(s)
@@ -139,61 +176,85 @@ class FrenetOptimalTrajectoryPlanner(AbstractPlanner):
     ) -> List[FrenetPath]:
 
         # calculate strategy_config
-        if target_speed > HIGH_SPEED_VELOCITY_THRESHOLD_MPS and s_d0 > HIGH_SPEED_VELOCITY_THRESHOLD_MPS:
+        if s_d0 > HIGH_SPEED_VELOCITY_THRESHOLD_MPS:
             strategy_config = HighSpeedStrategyConfiguration
         else:
             strategy_config = LowSpeedStrategyConfiguration
         path_candidates = []
         # T_i set to = horizon_
-        t_i = self.horizon_time.time_s
-        max_s = self._reference_path_provider._s_of_reference_line[-1] - 10  # Leave some margin
-        t_i = min(t_i, max_s / target_speed) if target_speed > 0 else t_i
-        lon_paths = self._speed_profile_strategy.calc_longitudinal_trajectory(
-            target_speed,
-            # start
-            s0,
-            # s'(t)
-            s_d0,
-            # s''(t)
-            s_dd0,
-            t_i,
-            self.sampling_time.time_s,
-            strategy_config,
+        T_i = self.horizon_time.time_s
+        # Leave some margin
+        max_s = (
+            self._reference_path_provider._s_of_reference_line[-1] - 10
         )
-        for fp in lon_paths:
-            # generate lateral trajectory for each speed profile
-            for d_i in self._speed_profile_strategy.get_d_arrange(s0, self._reference_path_provider, strategy_config):
+        T_i = min(T_i, max_s / target_speed) if target_speed > 0 else t_i
 
-                updated_fp = self._lateral_movement_strategy.calc_lateral_trajectory(fp, d0, d_d0, d_dd0, d_i, t_i)
+        for t_i in np.arange(T_i / 2, T_i, 0.2):
+            lon_paths = self._speed_profile_strategy.calc_longitudinal_trajectory(
+                target_speed,
+                # start
+                s0,
+                # s'(t)
+                s_d0,
+                # s''(t)
+                s_dd0,
+                t_i,
+                self.sampling_time.time_s,
+                strategy_config,
+            )
 
-                # calculate cost
-                Jp = sum(np.power(updated_fp.d_ddd, 2))  # square of lateral jerk
-                Js = sum(np.power(updated_fp.s_ddd, 2))  # square of lateral jerk
-
-                if target_speed >= HIGH_SPEED_VELOCITY_THRESHOLD_MPS:
-                    # highspeed
-                    lat_cost = CostWeight.K_J * Jp + CostWeight.K_T * t_i + CostWeight.K_D * updated_fp.d[-1] ** 2
-                else:
-                    # lowspeed
-                    S = updated_fp.s[-1] - updated_fp.s[0]
-                    lat_cost = CostWeight.K_J * Jp + CostWeight.K_T * S + CostWeight.K_D * updated_fp.d[-1] ** 2
-
-                lon_cost = (
-                    CostWeight.K_J * Js
-                    + CostWeight.K_T * t_i
-                    + self._speed_profile_strategy.calc_destination_cost(
-                        target_speed, updated_fp, strategy_config
+            for fp in lon_paths:
+                # generate lateral trajectory for each speed profile
+                for d_i in self._speed_profile_strategy.get_d_arrange(
+                    s0, self._reference_path_provider, strategy_config
+                ):
+                    
+                    if  d0 * d_i < 0:
+                        continue 
+                    updated_fp = self._lateral_movement_strategy.calc_lateral_trajectory(
+                        fp, d0, d_d0, d_dd0, d_i, t_i
                     )
-                )
-                updated_fp.cf = CostWeight.K_LAT * lat_cost + CostWeight.K_LON * lon_cost
-                path_candidates.append(updated_fp)
+
+                    # calculate cost
+                    Jp = sum(np.power(updated_fp.d_ddd, 2))  # square of lateral jerk
+                    Js = sum(np.power(updated_fp.s_ddd, 2))  # square of lateral jerk
+
+                    if s_d0 >= HIGH_SPEED_VELOCITY_THRESHOLD_MPS:
+                        # highspeed
+                        lat_cost = (
+                            CostWeight.K_J * Jp
+                            + CostWeight.K_T * t_i
+                            + CostWeight.K_D * updated_fp.d[-1] ** 2
+                        )
+                    else:
+                        # lowspeed
+                        S = updated_fp.s[-1] - updated_fp.s[0]
+                        lat_cost = (
+                            CostWeight.K_J * Jp
+                            + CostWeight.K_T * S
+                            + CostWeight.K_D * updated_fp.d[-1] ** 2
+                        )
+
+                    lon_cost = (
+                        CostWeight.K_J * Js
+                        + CostWeight.K_T * t_i
+                        + self._speed_profile_strategy.calc_destination_cost(
+                            target_speed, updated_fp, strategy_config
+                        )
+                    )
+                    updated_fp.cf = (
+                        CostWeight.K_LAT * lat_cost + CostWeight.K_LON * lon_cost
+                    )
+                    path_candidates.append(updated_fp)
         return path_candidates
 
     def compute_transformed_path(self, candidate_paths: List[FrenetPath]):
         for i in range(len(candidate_paths)):
             # produce frenet -> cartesian transform
-            candidate_paths[i] = self._lateral_movement_strategy.calc_cartesian_parameters(
-                candidate_paths[i], self._reference_path_provider
+            candidate_paths[i] = (
+                self._lateral_movement_strategy.calc_cartesian_parameters(
+                    candidate_paths[i], self._reference_path_provider
+                )
             )
         return candidate_paths
 
@@ -213,9 +274,14 @@ class FrenetOptimalTrajectoryPlanner(AbstractPlanner):
                     for (ix, iy) in zip(candidate_path.x, candidate_path.y)
                 ]
             else:
-                waypoints:Waypoint  = tracked.predictions[0].waypoints  # PredictedTrajectory
+                waypoints: Waypoint = tracked.predictions[
+                    0
+                ].waypoints  # PredictedTrajectory
                 d_over_time = [
-                    ((ix - wp._oriented_box.center.x) ** 2 + (iy - wp._oriented_box.center.y) ** 2)
+                    (
+                        (ix - wp._oriented_box.center.x) ** 2
+                        + (iy - wp._oriented_box.center.y) ** 2
+                    )
                     for (wp, ix, iy) in zip(
                         waypoints,
                         candidate_path.x,
@@ -223,9 +289,9 @@ class FrenetOptimalTrajectoryPlanner(AbstractPlanner):
                     )
                 ]
 
-            collision = any([d < 2 for d in d_over_time ])
+            collision = any([d < 2 for d in d_over_time])
 
-            if collision: 
+            if collision:
                 return True
 
         return False
@@ -241,12 +307,12 @@ class FrenetOptimalTrajectoryPlanner(AbstractPlanner):
             if any(np.array(candidate.v) > self.max_velocity):
                 click.secho(f"candidate velocity > max_velocity", fg="red")
                 continue
-            if any(np.abs(candidate.a) > self.max_accel):
-                click.secho(f"candidate accel > max_accel", fg="red")
-                continue
-            if any(np.abs(candidate.kappa) > self.max_curvature):
-                click.secho(f"candidate curvature > max_curvature", fg="red")
-                continue
+            # if any(np.abs(candidate.a) > self.max_accel):
+            #     click.secho(f"candidate accel > max_accel", fg="red")
+            #     continue
+            # if any(np.abs(candidate.kappa) > self.max_curvature):
+            #     click.secho(f"candidate curvature > max_curvature", fg="red")
+            #     continue
             if self.check_collision(candidate, track_objects):
                 click.secho(
                     f"candidate collides with one(or more) track_objects", fg="red"
@@ -263,7 +329,7 @@ class FrenetOptimalTrajectoryPlanner(AbstractPlanner):
         horizon_time: TimePoint,
         sampling_time: TimePoint,
         max_velocity: float,
-        target_velocity: float
+        target_velocity: float,
     ) -> List[EgoState]:
         """
         Implement trajectory planning based on input and output, recommend using lattice planner or piecewise jerk planner.
@@ -309,7 +375,7 @@ class FrenetOptimalTrajectoryPlanner(AbstractPlanner):
         x_ref = x_interp(s_ref)
         y_ref = y_interp(s_ref)
         theta_ref = heading_interp(s_ref)
-        kappa_ref = kappa_interp(s_ref)    
+        kappa_ref = kappa_interp(s_ref)
         dkappa_ref = dkappa_interp(s_ref)
 
         print(f"Found closest s_ref={s_ref:.2f} at tick")
@@ -331,9 +397,11 @@ class FrenetOptimalTrajectoryPlanner(AbstractPlanner):
             math.tan(ego_state.tire_steering_angle)
             / ego_state.car_footprint.vehicle_parameters.wheel_base,
         )
-        print(f"{s0=}, {s_d0=}, {s_dd0=}, {d0=}, {d_d0=}, {d_dd0=}, tire_steering_angle={ego_state.tire_steering_angle}")
+        print(f"{s0=}, {s_d0=}, {s_dd0=}, {d0=}, {d_d0=}, {d_dd0=}")
 
-        optimal_path = self.frenet_path_planning(self.target_velocity, s0, s_d0, s_dd0, d0, d_d0, d_dd0, tracked_objects)
+        optimal_path = self.frenet_path_planning(
+            self.target_velocity, s0, s_d0, s_dd0, d0, d_d0, d_dd0, tracked_objects
+        )
 
         # 4.Produce ego trajectory
         state = EgoState(
@@ -343,7 +411,6 @@ class FrenetOptimalTrajectoryPlanner(AbstractPlanner):
                 ego_state.dynamic_car_state.rear_axle_velocity_2d,
                 ego_state.dynamic_car_state.rear_axle_acceleration_2d,
             ),
-            # tire_steering_angle=ego_state.dynamic_car_state.tire_steering_rate,
             tire_steering_angle=ego_state.tire_steering_angle,
             is_in_auto_mode=True,
             time_point=ego_state.time_point,
@@ -359,7 +426,7 @@ class FrenetOptimalTrajectoryPlanner(AbstractPlanner):
                 optimal_path.t,
                 optimal_path.s,
                 optimal_path.s_d,
-                optimal_path.s_dd
+                optimal_path.s_dd,
             )
             # 根据当前时间下的s 和 路径规划结果 计算 x y heading kappa （线形插值）
             x, y, heading, _ = cal_pose(
@@ -393,20 +460,21 @@ class FrenetOptimalTrajectoryPlanner(AbstractPlanner):
     def frenet_path_planning(
         self,
         target_speed: float,
-        s0: float, # s0
-        s_d0: float, # s'(t)
-        s_dd0: float, # s''(t)
-        d0: float, 
-        d_d0: float, # d'(s)
-        d_dd0: float, # d''(s)
-        tracked_objects: TrackedObjects
+        s0: float,  # s0
+        s_d0: float,  # s'(t)
+        s_dd0: float,  # s''(t)
+        d0: float,
+        d_d0: float,  # d'(s)
+        d_dd0: float,  # d''(s)
+        tracked_objects: TrackedObjects,
     ) -> FrenetPath:
-
         """Find the optimal path in Frenet frame given the reference line and return the path sample points in Frenet frame."""
 
         # TODO: update movement, speed_profile based on traffic observation and intention
 
-        candidate_paths = self.compute_frenet_path(target_speed, s0, s_d0, s_dd0, d0, d_d0, d_dd0)
+        candidate_paths = self.compute_frenet_path(
+            target_speed, s0, s_d0, s_dd0, d0, d_d0, d_dd0
+        )
         candidate_paths = self.compute_transformed_path(candidate_paths)
         collision_free_paths = self.check_paths(candidate_paths, tracked_objects)
         print(f"num candidate path: {len(candidate_paths)}")
@@ -417,27 +485,28 @@ class FrenetOptimalTrajectoryPlanner(AbstractPlanner):
         if optimal_path:
             print(f"optimal_path v: {optimal_path.v}")
             print(f"optimal_path s: {optimal_path.s}")
-            self.optimal_path  = optimal_path
+            self.optimal_path = optimal_path
         else:
             print("optimal path is None!")
-            # optimal_path = self.optimal_path
-            # optimal_path.t =  optimal_path.t[:-1]
-            # optimal_path.a = optimal_path.a[1:]
-            # optimal_path.v = optimal_path.v[1:]
-            # optimal_path.x = optimal_path.x[1:]
-            # optimal_path.y = optimal_path.y[1:]
-            # optimal_path.yaw = optimal_path.yaw[1:]
-            # optimal_path.kappa = optimal_path.kappa[1:]
-            # optimal_path.d = optimal_path.d[1:]
-            # optimal_path.d_d = optimal_path.d_d[1:]
-            # optimal_path.d_dd = optimal_path.d_dd[1:]
-            # optimal_path.d_ddd = optimal_path.d_ddd[1:]
-            # optimal_path.s = optimal_path.s[1:]
-            # optimal_path.s_d = optimal_path.s_d[1:]
-            # optimal_path.s_dd = optimal_path.s_dd[1:]
-            # optimal_path.s_ddd = optimal_path.s_ddd[1:]
-            # optimal_path.cf = optimal_path.cf
+            optimal_path = self.optimal_path
+            optimal_path.t =  optimal_path.t[1:]
+            optimal_path.a = optimal_path.a[1:]
+            optimal_path.v = optimal_path.v[1:]
+            optimal_path.x = optimal_path.x[1:]
+            optimal_path.y = optimal_path.y[1:]
+            optimal_path.yaw = optimal_path.yaw[1:]
+            optimal_path.kappa = optimal_path.kappa[1:]
+            optimal_path.d = optimal_path.d[1:]
+            optimal_path.d_d = optimal_path.d_d[1:]
+            optimal_path.d_dd = optimal_path.d_dd[1:]
+            optimal_path.d_ddd = optimal_path.d_ddd[1:]
+            optimal_path.s = optimal_path.s[1:]
+            optimal_path.s_d = optimal_path.s_d[1:]
+            optimal_path.s_dd = optimal_path.s_dd[1:]
+            optimal_path.s_ddd = optimal_path.s_ddd[1:]
+            optimal_path.cf = optimal_path.cf
 
-            # optimal_path.path_idx2s=optimal_path.path_idx2s[1:]
+            optimal_path.path_idx2s=optimal_path.path_idx2s[1:]
+            self.optimal_path = optimal_path
 
         return optimal_path
