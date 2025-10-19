@@ -587,6 +587,8 @@ def encoding_vectornet_features(agents_past, agents_future, ego_past, ego_future
         """
         Compute 8D vectors for a polyline: [start_x, start_y, end_x, end_y, type, validity, traffic_status, timestamp].
         Positions are in ego-relative frame, shape (num_points, 3) for [x, y, heading].
+
+        # TODO: paper says speed_limit is also a feature. need to look into map data and api more closely
         """
         if positions.shape[0] < 2:
             return np.empty((0, 8), dtype=np.float32)
