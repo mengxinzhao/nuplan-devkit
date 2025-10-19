@@ -13,9 +13,15 @@ class GraphLayerProp(MessagePassing):
             verbose (bool, optional)   : 输出调试信息的标志位. 缺省为 False.
         """
         # 初始化 GNN 的聚合操作为 Max Pooling
-        super(GraphLayerProp, self).__init__(aggr='max')  
+        super(GraphLayerProp, self).__init__(aggr='max') 
+        self.mlp = nn.Sequential(
+            nn.Linear(in_channels, hidden_unit),
+            nn.LayerNorm(hidden_unit),
+            nn.ReLU(),
+            nn.Linear(hidden_unit, in_channels)
+        )
 
-        pass
+
 
     def forward(self, x, edge_index):
         """GNN 层的推理流程，对应论文中的 Figure 3
@@ -24,9 +30,10 @@ class GraphLayerProp(MessagePassing):
             edge_index: Adjacency Array
         Returns: Output Nodes Features
         """
+        x  = self.mlp(x)
+        return self.propagate(edge_index, size=(x.size(0), x.size(0)), x=x)
 
-        # 调用 propagate 方法执行 message update 和 max pooling aggregate
-        pass
+      
 
     def message(self, x_j):
         """Message Passing 的消息生成阶段
@@ -35,7 +42,7 @@ class GraphLayerProp(MessagePassing):
 
         Returns: Exactly the input
         """    
-        pass
+        return x_j
 
     def update(self, aggr_out, x):
         """Concat 阶段
@@ -44,7 +51,7 @@ class GraphLayerProp(MessagePassing):
             x       : Node Encoder output
         Returns: Output Node Features
         """
-        pass
+        return torch.cat([x, aggr_out], dim=1)
 
 
 class SubGraph(nn.Module):
