@@ -33,6 +33,9 @@ if __name__ == '__main__':
     )
 
     print("Building scenario ...")
+    print(f"Database files: {db_files}")
+    print("Map root: ", config.MAP_PATH)
+    print("data root: ", config.DATA_PATH)
     builder = NuPlanScenarioBuilder(
         config.DATA_PATH, 
         config.MAP_PATH, 
@@ -76,7 +79,7 @@ if __name__ == '__main__':
             data, features = data_processor.process(config.TEST_PATH)
 
         count = count + 1
-
+    print(f"train path: {config.TRAIN_PATH}, test path: {config.TEST_PATH}")
     GraphDataset(config.TRAIN_PATH)
     GraphDataset(config.TEST_PATH)
     train_data_file = os.listdir(config.TRAIN_PATH)

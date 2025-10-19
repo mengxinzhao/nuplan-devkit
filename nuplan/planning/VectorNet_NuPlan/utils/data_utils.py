@@ -540,29 +540,152 @@ def restore_agent_traj_from_increments(origin, increments):
 
     return trajectory
 
-#TODO: 1. Representing trajectories and maps, 
+ #TODO: 1. Representing trajectories and maps, 
 def encoding_vectornet_features(agents_past, agents_future, ego_past, ego_future, vector_map):
-    # each subgraph has its only ID
-    subgraph_ID = 0
-    # each subgraph ID has a series of node. These nodes are stacked 
-    # vertically in a list and there has a start node and end node.  
+    """
+    Encodes trajectories and map data into VectorNet features.
+    Each polyline (ego, agent, or map element) is represented as a sequence of vectors (segments).
+    Each vector is 8D: [start_x, start_y, end_x, end_y, type, validity, traffic_status, timestamp_delta].
+    Only past data and map data are used as input features. Future data is for ground truth.
+
+    Args:
+        agents_past: np.ndarray of shape (num_agents, num_past_poses, 11), past agent states.
+        agents_future: np.ndarray of shape (num_agents, num_future_poses, 3), future agent states.
+        ego_past: np.ndarray of shape (num_past_poses, 7), past ego states.
+        ego_future: np.ndarray of shape (num_future_poses, 3), future ego states.
+        vector_map: dict with keys 'lanes', 'route_lanes', 'crosswalks', each containing np.ndarray
+                    of shape (num_elements, num_points, dim) where dim=7 for lanes (x,y,heading+4 TL), 3 otherwise.
+
+    Returns:
+        pd.DataFrame with columns:
+            - POLYLINE_FEATURES: np.ndarray of shape (num_vectors, 8), stacked trajectory and map vectors.
+            - GROUND_TRUTH: np.ndarray of shape (num_agents+1, num_future_poses, 2), ego and agent future (x,y).
+            - TRAJ_ID_TO_INDICES: dict mapping polyline ID to list of vector indices in POLYLINE_FEATURES.
+            - LANE_ID_TO_INDICES: dict mapping map polyline ID to list of vector indices in POLYLINE_FEATURES.
+            - TARJ_SIZE: int, number of trajectory vectors.
+            - LANE_SIZE: int, number of map vectors.
+    """
+    # Initialize data structures
+    trajectory_subgraph = np.empty((0, 8), dtype=np.float32)  # 8D: [start_x, start_y, end_x, end_y, type, validity, traffic_status, timestamp_delta]
+    map_subgraph = np.empty((0, 8), dtype=np.float32)
+    ground_truth = np.zeros((agents_past.shape[0] + 1, ego_future.shape[0], 2), dtype=np.float32)  # Ego + agents, (x,y)
     trajectory_ID_to_indices = {}
     map_ID_to_indices = {}
-    
-    # create an empty trajectory subgraph
-    # each node is a 1 * 8 tensor 
-    trajectory_subgraph = np.empty((0, 8))
+    polyline_id = 0
 
-    # create an empty map subgraph
-    # each node is a 1 * 8 tensor
-    map_subgraph = np.empty((0, 8))
-    ground_truth = np.empty((0, 2))
+    # Get ego's current pose for global coordinate transformation
+    origin_pose = StateSE2(x=ego_past[-1, 0], y=ego_past[-1, 1], heading=ego_past[-1, 2])
 
-    '''
-    Add your code here
-    '''
+    def ndarray_to_state_se2(array: np.ndarray) -> list:
+        """Convert numpy array of poses to list of StateSE2 objects."""
+        if array.ndim == 3:
+            array = array.reshape(-1, array.shape[-1])
+        return [StateSE2(x=pose[0], y=pose[1], heading=pose[2])
+                for pose in array if not np.allclose(pose[:2], 0)]  # Skip zero-padded points
 
-    # data frame
+    def compute_8dim_vectors(positions: np.ndarray, timestamps: np.ndarray, polyline_type: int, traffic_status: np.ndarray = None) -> np.ndarray:
+        """
+        Compute 8D vectors for a polyline: [start_x, start_y, end_x, end_y, type, validity, traffic_status, timestamp].
+        Positions are in ego-relative frame, shape (num_points, 3) for [x, y, heading].
+        """
+        if positions.shape[0] < 2:
+            return np.empty((0, 8), dtype=np.float32)
+
+        # Compute segment vectors: [start_x, start_y, end_x, end_y]
+
+        vectors = np.zeros((positions.shape[0] - 1, 8), dtype=np.float32)
+        vectors[:, 0:2] = positions[:-1, :2]  # start (x,y)
+        vectors[:, 2:4] = positions[1:, :2]   # end (x,y)
+        # Attributes
+        vectors[:, 4] = polyline_type  # Type: 0=ego, 1=agent, 2=lane, 3=route_lane, 4=crosswalk
+        vectors[:, 5] = 1.0 
+        if traffic_status is not None:
+            traffic_status_range = min(vectors.shape[0], positions.shape[0])
+            vectors[:traffic_status_range, 6] = traffic_status[:traffic_status_range] # Traffic light or crosswalk status
+        if timestamps is not None:
+            vectors[:positions.shape[0], 7] = np.diff(timestamps[:positions.shape[0]]) 
+        else:
+            vectors[:, 7] = 0.1  # Default delta (e.g., 0.1s for 4s/40 intervals)
+        return vectors
+
+    # Process ego past (type=0)
+    ego_past_poses = ndarray_to_state_se2(ego_past)
+    ego_past_rel = convert_absolute_to_relative_poses(origin_pose, ego_past_poses)
+    # Assume timestamps are evenly spaced
+    past_timestamps = np.linspace(-config.PAST_TIME_HORIZON, 0, config.NUM_PAST_POSES, dtype=np.float32)
+    if ego_past_rel.shape[0] > 1:
+        ego_vectors = compute_8dim_vectors(ego_past_rel[:config.NUM_PAST_POSES], past_timestamps, polyline_type=0)
+        trajectory_ID_to_indices[polyline_id] = list(range(trajectory_subgraph.shape[0], trajectory_subgraph.shape[0] + ego_vectors.shape[0]))
+        trajectory_subgraph = np.vstack([trajectory_subgraph, ego_vectors])
+        polyline_id += 1
+    # Ground truth for ego
+    ground_truth[0, :, 0] = ego_future[:, 0]  # x
+    ground_truth[0, :, 1] = ego_future[:, 1]  # y
+
+    # Process ego future (type=0)
+    ego_future_poses = ndarray_to_state_se2(ego_future)
+    ego_future_rel = convert_absolute_to_relative_poses(origin_pose, ego_future_poses)
+    # Generate future timestamps (start from 0 to FUTURE_TIME_HORIZON)
+    future_timestamps = np.linspace(0, config.FUTURE_TIME_HORIZON, config.NUM_FUTURE_POSES, dtype=np.float32)
+    if ego_future_rel.shape[0] > 1:
+        ego_future_vectors = compute_8dim_vectors(ego_future_rel[:config.NUM_FUTURE_POSES], future_timestamps, polyline_type=0)
+        trajectory_ID_to_indices[polyline_id] = list(range(trajectory_subgraph.shape[0], trajectory_subgraph.shape[0] + ego_future_vectors.shape[0]))
+        trajectory_subgraph = np.vstack([trajectory_subgraph, ego_future_vectors])
+        polyline_id += 1
+
+    # Process agent past (type=1)
+    for i in range(agents_past.shape[0]):
+        agent_past = agents_past[i]
+        agent_past_poses = ndarray_to_state_se2(agent_past)
+        if not agent_past_poses:
+            continue
+        agent_past_rel = convert_absolute_to_relative_poses(origin_pose, agent_past_poses)
+        if agent_past_rel.shape[0] > 1:
+            agent_vectors = compute_8dim_vectors(agent_past_rel[:config.NUM_PAST_POSES], past_timestamps, polyline_type=1)
+            trajectory_ID_to_indices[polyline_id] = list(range(trajectory_subgraph.shape[0], trajectory_subgraph.shape[0] + agent_vectors.shape[0]))
+            trajectory_subgraph = np.vstack([trajectory_subgraph, agent_vectors])
+            polyline_id += 1
+        # Ground truth for agent
+        ground_truth[i + 1, :, 0] = agents_future[i, :, 0]  # x
+        ground_truth[i + 1, :, 1] = agents_future[i, :, 1]  # y
+
+    # Process agent future (type=1)
+    for i in range(agents_future.shape[0]):
+        agent_future = agents_future[i]
+        agent_future_poses = ndarray_to_state_se2(agent_future)
+        if not agent_future_poses:
+            continue
+        agent_future_rel = convert_absolute_to_relative_poses(origin_pose, agent_future_poses)
+        if agent_future_rel.shape[0] > 1:
+            agent_future_vectors = compute_8dim_vectors(agent_future_rel[:config.NUM_FUTURE_POSES], future_timestamps, polyline_type=1)
+            trajectory_ID_to_indices[polyline_id] = list(range(trajectory_subgraph.shape[0], trajectory_subgraph.shape[0] + agent_future_vectors.shape[0]))
+            trajectory_subgraph = np.vstack([trajectory_subgraph, agent_future_vectors])
+            polyline_id += 1
+
+    # Process map elements (lanes=2, route_lanes=3, crosswalks=4)
+    map_feature_types = [('lanes', 2, config.LANE_NUM), ('route_lanes', 3, config.ROUTE_LANES_NUM), ('crosswalks', 4, config.CROSSWALKS_NUM)]
+    for feature_type, polyline_type, max_elements in map_feature_types:
+        map_elements = vector_map.get(feature_type, np.empty((0, 3)))
+        for i in range(min(max_elements, map_elements.shape[0])):
+            element = map_elements[i]
+            element_poses = ndarray_to_state_se2(element)
+            if not element_poses:
+                continue
+            element_rel_poses = convert_absolute_to_relative_poses(origin_pose, element_poses)
+            # Traffic light for lanes (1 if red/yellow, 0 otherwise); crosswalks get 1
+            traffic_status = None
+            if feature_type == 'lanes' and element.shape[-1] >= 7:
+                # TL: [green, yellow, red, unknown]; set 1 if red or yellow
+                traffic_status = np.any(element[:-1, 4:6], axis=-1).astype(np.float32)  # Shape: (num_points-1,)
+            elif feature_type == 'crosswalks':
+                traffic_status = np.ones(element.shape[0] - 1, dtype=np.float32)
+            if element_rel_poses.shape[0] > 1:
+                element_vectors = compute_8dim_vectors(element_rel_poses, None, polyline_type, traffic_status)
+                map_ID_to_indices[polyline_id] = list(range(map_subgraph.shape[0], map_subgraph.shape[0] + element_vectors.shape[0]))
+                map_subgraph = np.vstack([map_subgraph, element_vectors])
+                polyline_id += 1
+
+    # Combine and create DataFrame
     feature_data = [[
         np.vstack((trajectory_subgraph, map_subgraph)),
         ground_truth,
@@ -573,14 +696,13 @@ def encoding_vectornet_features(agents_past, agents_future, ego_past, ego_future
     ]]
 
     return pd.DataFrame(feature_data, columns=[
-            "POLYLINE_FEATURES", 
-            "GROUND_TRUTH",
-            "TRAJ_ID_TO_INDICES", 
-            "LANE_ID_TO_INDICES", 
-            "TARJ_SIZE", 
-            "LANE_SIZE"
-        ]
-    )
+        "POLYLINE_FEATURES",
+        "GROUND_TRUTH",
+        "TRAJ_ID_TO_INDICES",
+        "LANE_ID_TO_INDICES",
+        "TARJ_SIZE",
+        "LANE_SIZE"
+    ])
 
 def save_features(df, name, dir_=None):
     """
